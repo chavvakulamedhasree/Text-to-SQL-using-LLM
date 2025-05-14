@@ -1,78 +1,81 @@
-import streamlit as st
 import sqlite3
+import streamlit as st
 import google.generativeai as genai
 
-def get_gemini_response(question, prompt, schema):
-   
-    model = genai.GenerativeModel('gemini-1.5-flash') 
-    try:
-        prompt_with_schema = prompt + [f"Schema: {schema}"]
-        response = model.generate_text(prompt=[question] + prompt_with_schema) 
-        return response.text 
-    except Exception as e: 
-        print(f"Error generating response: {e}")
-        return "Error generating response."
+# --- Configure Gemini API ---
+genai.configure(api_key="YOUR_API_KEY")  # 🔁 Replace with your Gemini API key
 
-def read_sql_query(sql, db_path):
-    
+# --- Gemini Query Generator ---
+def get_sql_from_question(question, schema):
+    prompt = f"""
+    You are an expert in SQL.
+    Given the schema:
+    {schema}
+
+    Generate a SQL query for this question:
+    {question}
+
+    Only return the SQL query without explanation or formatting.
+    """
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    except Exception as e:
+        return f"Error generating query: {e}"
+
+# --- Extract Schema ---
+def get_schema(db_path, table):
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = cursor.fetchall()
+            return f"Table {table} has columns: " + ", ".join([f"{col[1]} ({col[2]})" for col in columns])
+    except Exception as e:
+        return f"Error retrieving schema: {e}"
+
+# --- Execute SQL ---
+def run_query(sql, db_path):
     try:
         with sqlite3.connect(db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(sql)
             rows = cursor.fetchall()
-            column_names = [description[0] for description in cursor.description]
-            return [dict(zip(column_names, row)) for row in rows]
+            columns = [desc[0] for desc in cursor.description]
+            return rows, columns
     except Exception as e:
-        return {"error": str(e)}
+        return None, [f"Error executing query: {e}"]
 
-def get_table_schema(db_path, table_name):
-   
-    try:
-        with sqlite3.connect(db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute(f"PRAGMA table_info({table_name});")
-            columns = cursor.fetchall()
-            column_desc = ", ".join([f"{col[1]} ({col[2]})" for col in columns])
-            return f"Table: {table_name}\n    Columns: {column_desc}"
-    except Exception as e:
-        return f"Error retrieving schema for {table_name}: {e}"
-prompt=[
-    """
-    You are an expert SQL assistant. 
-    Given the following database schema: 
+# --- Streamlit UI ---
+st.set_page_config("SQL Generator with Gemini")
+st.title("Gemini App to Generate SQL Queries")
 
-    Convert the following natural language query into a valid SQL query: 
-    """
-]
-# Streamlit App
-st.set_page_config(page_title="I can Retrieve Any SQL query")
-st.header("Gemini App To Retrieve SQL Data")
+question = st.text_input("Enter your question:")
+uploaded_db = st.file_uploader("Upload your SQLite .db file", type="db")
+table_name = st.text_input("Enter table name to extract schema:")
 
-question = st.text_input("Input: ", key="input")
-db_files = st.file_uploader("Select Database Files", type="db", accept_multiple_files=True) 
-table_name = st.text_input("Table Name:") 
+if st.button("Generate & Run SQL"):
+    if uploaded_db and question and table_name:
+        # Save uploaded DB file locally
+        with open(uploaded_db.name, "wb") as f:
+            f.write(uploaded_db.getbuffer())
+        
+        schema = get_schema(uploaded_db.name, table_name)
+        st.text(f"Schema:\n{schema}")
 
-submit = st.button("Ask the question")
+        sql_query = get_sql_from_question(question, schema)
+        st.subheader("Generated SQL Query")
+        st.code(sql_query)
 
-if submit and db_files and table_name:
-    for db_file in db_files:
-        st.subheader(f"Processing Database: {db_file.name}")
-        try:
-            schema = get_table_schema(db_file.name, table_name)
-            response = get_gemini_response(question, prompt, schema)
-            st.subheader("Generated SQL Query:")
-            st.code(response)
-
-            if response:
-                try:
-                    results = read_sql_query(response, db_file.name) 
-                    st.subheader("Query Results:")
-                    st.table(results) 
-                except Exception as e:
-                    st.error(f"Error executing query on {db_file.name}: {e}") 
+        if "Error" not in sql_query:
+            rows, columns = run_query(sql_query, uploaded_db.name)
+            if rows:
+                st.subheader("Query Results")
+                st.table([dict(zip(columns, row)) for row in rows])
             else:
-                st.warning("No SQL query generated.")
-        except Exception as e:
-            st.error(f"Error processing schema for {db_file.name}: {e}")
-else:
-    st.warning("Please select one or more database files and specify the table name.")
+                st.warning(columns[0])  # Display error
+        else:
+            st.error(sql_query)
+    else:
+        st.warning("Please provide a question, database file, and table name.")
